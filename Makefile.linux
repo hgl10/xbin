@@ -1,0 +1,3 @@
+xbin.so:
+	gcc -g -fPIC -shared xbin.c -o xbin.so
+

@@ -1,0 +1,2 @@
+xbin.dll:
+	cl /I . xbin.c -link -dll -out:xbin.dll
