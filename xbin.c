@@ -16,6 +16,7 @@ SQLITE_EXTENSION_INIT1
 #include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* Max size of the error message in a XbinReader */
 #define XBIN_MXERR 200
@@ -93,27 +94,27 @@ static int xbin_reader_open(
 
 /* Forward references to the various virtual table methods implemented
 ** in this file. */
-static int xbinTabCreate(sqlite3*, void*, int, const char*const*, 
-                           sqlite3_vtab**,char**);
-static int xbinTabConnect(sqlite3*, void*, int, const char*const*, 
-                           sqlite3_vtab**,char**);
-static int xbinTabBestIndex(sqlite3_vtab*,sqlite3_index_info*);
-static int xbinTabDisconnect(sqlite3_vtab*);
-static int xbinTabOpen(sqlite3_vtab*, sqlite3_vtab_cursor**);
-static int xbinTabClose(sqlite3_vtab_cursor*);
-static int xbinTabFilter(sqlite3_vtab_cursor*, int idxNum, const char *idxStr,
-                          int argc, sqlite3_value **argv);
-static int xbinTabNext(sqlite3_vtab_cursor*);
-static int xbinTabEof(sqlite3_vtab_cursor*);
-static int xbinTabColumn(sqlite3_vtab_cursor*,sqlite3_context*,int);
-static int xbinTabRowid(sqlite3_vtab_cursor*,sqlite3_int64*);
+static int xbinCreate(sqlite3*, void*, int, const char*const*, 
+                        sqlite3_vtab**,char**);
+static int xbinConnect(sqlite3*, void*, int, const char*const*, 
+                        sqlite3_vtab**,char**);
+static int xbinBestIndex(sqlite3_vtab*,sqlite3_index_info*);
+static int xbinDisconnect(sqlite3_vtab*);
+static int xbinOpen(sqlite3_vtab*, sqlite3_vtab_cursor**);
+static int xbinClose(sqlite3_vtab_cursor*);
+static int xbinFilter(sqlite3_vtab_cursor*, int idxNum, const char *idxStr,
+                       int argc, sqlite3_value **argv);
+static int xbinNext(sqlite3_vtab_cursor*);
+static int xbinEof(sqlite3_vtab_cursor*);
+static int xbinColumn(sqlite3_vtab_cursor*,sqlite3_context*,int);
+static int xbinRowid(sqlite3_vtab_cursor*,sqlite3_int64*);
 
 /* XbinTable is a subclass of sqlite3_vtab which is
 ** underlying representation of the virtual table
 */
 typedef struct XbinTable {
   sqlite3_vtab base;  /* Base class - must be first */
-  char *zFilename;    /* Name of the xbin file */
+  char *filename;     /* Name of the xbin file */
   long iStart;        /* Offset to start of data in zFilename */
 } XbinTable;
 
@@ -121,9 +122,15 @@ typedef struct XbinTable {
 ** serve as the underlying representation of a cursor that scans
 ** over rows of the result
 */
+#define BUF_SIZE 4
 typedef struct XbinCursor {
-  sqlite3_vtab_cursor base;  /* Base class - must be first */
-  sqlite3_int64 iRowid;      /* The rowid */
+  sqlite3_vtab_cursor base;   /* Base class - must be first */
+  FILE *fptr;                 /* used to scan file */
+  sqlite3_int64 row;          /* The rowid */
+  int eof;                    /* EOF flag */
+
+  /* per-row data */
+  int16_t buf[BUF_SIZE];      /* row data buffer*/
 } XbinCursor;
 
 /*
@@ -148,19 +155,26 @@ static int xbinConnect(
 ){
   XbinTable *pNew;
   int rc;
+  const char *filename = argv[3];
+  if ( argc != 4 ) return SQLITE_ERROR;
+
+  pNew = sqlite3_malloc( sizeof(*pNew) );
+  *ppVtab = (sqlite3_vtab*)pNew;
+  if( pNew==0 ) return SQLITE_NOMEM;
+  memset(pNew, 0, sizeof(*pNew));
+
+  pNew->filename = sqlite3_mprintf( "%s", filename );
 
   rc = sqlite3_declare_vtab(db,
-           "CREATE TABLE x(a INTEGER,b INTEGER)"
+           "CREATE TABLE x(id INTEGER,iq INTEGER, speed INTEGER, torque INTEGER)"
        );
-  /* For convenience, define symbolic names for the index to each column. */
-#define XBIN_A  0
-#define XBIN_B  1
-  if( rc==SQLITE_OK ){
-    pNew = sqlite3_malloc( sizeof(*pNew) );
-    *ppVtab = (sqlite3_vtab*)pNew;
-    if( pNew==0 ) return SQLITE_NOMEM;
-    memset(pNew, 0, sizeof(*pNew));
+
+  if( rc!=SQLITE_OK ) {
+    sqlite3_free( pNew->filename );
+    sqlite3_free( pNew );
+    return SQLITE_ERROR;
   }
+
   return rc;
 }
 
@@ -169,6 +183,7 @@ static int xbinConnect(
 */
 static int xbinDisconnect(sqlite3_vtab *pVtab){
   XbinTable *p = (XbinTable*)pVtab;
+  sqlite3_free( p->filename );
   sqlite3_free(p);
   return SQLITE_OK;
 }
@@ -176,12 +191,25 @@ static int xbinDisconnect(sqlite3_vtab *pVtab){
 /*
 ** Constructor for a new XbinCursor object.
 */
-static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
-  XbinCursor *pCur;
+static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
+  XbinTable   *pTab = (XbinTable*) p;
+  XbinCursor  *pCur;
+  FILE        *fptr;
+
+  *cur = NULL;
+
+  fptr = fopen( pTab->filename, "rb" );
+  if ( fptr == NULL ) return SQLITE_ERROR;
+
   pCur = sqlite3_malloc( sizeof(*pCur) );
-  if( pCur==0 ) return SQLITE_NOMEM;
+  if( pCur==0 ) {
+    fclose(fptr);
+    return SQLITE_NOMEM;
+  }
   memset(pCur, 0, sizeof(*pCur));
-  *ppCursor = &pCur->base;
+  pCur->fptr = fptr;
+
+  *cur = &pCur->base;
   return SQLITE_OK;
 }
 
@@ -190,18 +218,27 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor){
 */
 static int xbinClose(sqlite3_vtab_cursor *cur){
   XbinCursor *pCur = (XbinCursor*)cur;
+  if (pCur->fptr != NULL) {
+    fclose(pCur->fptr);
+  }
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
 
+static int xbin_get_line( XbinCursor *pCur ) {
+  size_t ret = fread(pCur->buf, BUF_SIZE * sizeof(int16_t), 1, pCur->fptr);
+  pCur->row ++;
+  if (ret < 1) {
+    pCur->eof = 1;
+  }
+  return SQLITE_OK;
+}
 
 /*
 ** Advance a XbinCursor to its next row of output.
 */
 static int xbinNext(sqlite3_vtab_cursor *cur){
-  XbinCursor *pCur = (XbinCursor*)cur;
-  pCur->iRowid++;
-  return SQLITE_OK;
+  return xbin_get_line((XbinCursor*)cur);
 }
 
 /*
@@ -214,25 +251,15 @@ static int xbinColumn(
   int i                       /* Which column to return */
 ){
   XbinCursor *pCur = (XbinCursor*)cur;
-  switch( i ){
-    case XBIN_A:
-      sqlite3_result_int(ctx, 1000 + pCur->iRowid);
-      break;
-    default:
-      assert( i==XBIN_B );
-      sqlite3_result_int(ctx, 2000 + pCur->iRowid);
-      break;
-  }
+  sqlite3_result_int(ctx, pCur->buf[i]);
   return SQLITE_OK;
 }
 
 /*
-** Return the rowid for the current row.  In this implementation, the
-** rowid is the same as the output value.
+** Return the rowid for the current row, just same as the row number.
 */
 static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
-  XbinCursor *pCur = (XbinCursor*)cur;
-  *pRowid = pCur->iRowid;
+  *pRowid = ((XbinCursor*)cur)->row;
   return SQLITE_OK;
 }
 
@@ -241,8 +268,7 @@ static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
 ** row of output.
 */
 static int xbinEof(sqlite3_vtab_cursor *cur){
-  XbinCursor *pCur = (XbinCursor*)cur;
-  return pCur->iRowid>=10;
+  return ((XbinCursor*)cur)->eof;
 }
 
 /*
@@ -257,8 +283,10 @@ static int xbinFilter(
   int argc, sqlite3_value **argv
 ){
   XbinCursor *pCur = (XbinCursor *)pVtabCursor;
-  pCur->iRowid = 1;
-  return SQLITE_OK;
+  fseek( pCur->fptr, 0, SEEK_SET );
+  pCur->row = 0;
+  pCur->eof = 0;
+  return xbin_get_line(pCur);
 }
 
 /*
@@ -271,8 +299,6 @@ static int xbinBestIndex(
   sqlite3_vtab *tab,
   sqlite3_index_info *pIdxInfo
 ){
-  pIdxInfo->estimatedCost = (double)10;
-  pIdxInfo->estimatedRows = 10;
   return SQLITE_OK;
 }
 
@@ -282,11 +308,11 @@ static int xbinBestIndex(
 */
 static sqlite3_module xbinModule = {
   /* iVersion    */ 0,
-  /* xCreate     */ 0,
+  /* xCreate     */ xbinConnect,
   /* xConnect    */ xbinConnect,
   /* xBestIndex  */ xbinBestIndex,
   /* xDisconnect */ xbinDisconnect,
-  /* xDestroy    */ 0,
+  /* xDestroy    */ xbinDisconnect,
   /* xOpen       */ xbinOpen,
   /* xClose      */ xbinClose,
   /* xFilter     */ xbinFilter,
@@ -318,6 +344,6 @@ int sqlite3_xbin_init(
 ){
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
-  rc = sqlite3_create_module(db, "xbin", &xbinModule, 0);
+  rc = sqlite3_create_module(db, "xbin", &xbinModule, NULL);
   return rc;
 }
