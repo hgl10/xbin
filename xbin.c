@@ -1,13 +1,12 @@
 /*
 ** 2020-04-03 by hgl10
 ** xbin interface for sqlite virtual table
-** 
-** This template implements an eponymous-only virtual table with a rowid and
-** two columns named "a" and "b".  The table as 10 rows with fixed integer
-** values. Usage example:
 **
-**     SELECT rowid, a, b FROM xbin;
+** .load xbin
+** create virtual table xbin using xbin(./test.bin);
+** select count(*) from xbin;
 */
+
 #if !defined(SQLITEINT_H)
 #include "sqlite3ext.h"
 #endif
@@ -18,82 +17,9 @@ SQLITE_EXTENSION_INIT1
 #include <stdio.h>
 #include <stdint.h>
 
-/* Max size of the error message in a XbinReader */
-#define XBIN_MXERR 200
+#define BLOCK_EXPO 10
+#define BLOCK_SIZE 1024
 
-/* Size of the XbinReader input buffer */
-#define XBIN_INBUFSZ 64
-
-/* A context object used when read a Xbin file. */
-typedef struct XbinReader {
-  FILE *in;              /* Read the CSV text from this input stream */
-  char *z;               /* Accumulated text for a field */
-  int n;                 /* Number of bytes in z */
-  int nAlloc;            /* Space allocated for z[] */
-  int nLine;             /* Current line number */
-  int bNotFirst;         /* True if prior text has been seen */
-  int cTerm;             /* Character that terminated the most recent field */
-  size_t iIn;            /* Next unread character in the input buffer */
-  size_t nIn;            /* Number of characters in the input buffer */
-  char *zIn;             /* The input buffer */
-  char zErr[XBIN_MXERR];  /* Error message */
-} XbinReader;
-
-/* Initialize a XbinReader object */
-static void xbin_reader_init(XbinReader *p){
-  p->in = 0;
-  p->z = 0;
-  p->n = 0;
-  p->nAlloc = 0;
-  p->nLine = 0;
-  p->bNotFirst = 0;
-  p->nIn = 0;
-  p->zIn = 0;
-  p->zErr[0] = 0;
-}
-
-/* Close and reset a XbinReader object */
-static void xbin_reader_reset(XbinReader *p){
-  if( p->in ){
-    fclose(p->in);
-    sqlite3_free(p->zIn);
-  }
-  sqlite3_free(p->z);
-  xbin_reader_init(p);
-}
-
-/* Report an error on a XbinReader */
-static void xbin_errmsg(XbinReader *p, const char *zFormat, ...){
-  va_list ap;
-  va_start(ap, zFormat);
-  sqlite3_vsnprintf(XBIN_MXERR, p->zErr, zFormat, ap);
-  va_end(ap);
-}
-
-/* Open the file associated with a XbinReader
-** Return the number of errors.
-*/
-static int xbin_reader_open(
-  XbinReader *p,               /* The reader to open */
-  const char *zFilename       /* Read from this filename */
-){
-  p->zIn = sqlite3_malloc( XBIN_INBUFSZ );
-  if( p->zIn==0 ){
-    xbin_errmsg(p, "out of memory");
-    return 1;
-  }
-  p->in = fopen(zFilename, "rb");
-  if( p->in==0 ){
-    sqlite3_free(p->zIn);
-    xbin_reader_reset(p);
-    xbin_errmsg(p, "cannot open '%s' for reading", zFilename);
-    return 1;
-  }
-  return 0;
-}
-
-/* Forward references to the various virtual table methods implemented
-** in this file. */
 static int xbinCreate(sqlite3*, void*, int, const char*const*, 
                         sqlite3_vtab**,char**);
 static int xbinConnect(sqlite3*, void*, int, const char*const*, 
@@ -109,28 +35,38 @@ static int xbinEof(sqlite3_vtab_cursor*);
 static int xbinColumn(sqlite3_vtab_cursor*,sqlite3_context*,int);
 static int xbinRowid(sqlite3_vtab_cursor*,sqlite3_int64*);
 
+typedef struct xbinData {
+  float id;
+  float iq;
+  float speed;
+  float torque;
+  float Ld;
+  float Lq;
+  float Lambda;
+  float Rs;
+  float Temp;
+} xbinData;
+
 /* XbinTable is a subclass of sqlite3_vtab which is
 ** underlying representation of the virtual table
 */
 typedef struct XbinTable {
   sqlite3_vtab base;  /* Base class - must be first */
   char *filename;     /* Name of the xbin file */
-  long iStart;        /* Offset to start of data in zFilename */
 } XbinTable;
 
 /* XbinCursor is a subclass of sqlite3_vtab_cursor which will
 ** serve as the underlying representation of a cursor that scans
 ** over rows of the result
 */
-#define BUF_SIZE 4
 typedef struct XbinCursor {
   sqlite3_vtab_cursor base;   /* Base class - must be first */
   FILE *fptr;                 /* used to scan file */
   sqlite3_int64 row;          /* The rowid */
-  int eof;                    /* EOF flag */
 
-  /* per-row data */
-  int16_t buf[BUF_SIZE];      /* row data buffer*/
+  sqlite3_int64 row_total;    /*total row size*/
+  sqlite3_int64 block;        /*block read*/
+  xbinData data[BLOCK_SIZE];
 } XbinCursor;
 
 /*
@@ -166,7 +102,7 @@ static int xbinConnect(
   pNew->filename = sqlite3_mprintf( "%s", filename );
 
   rc = sqlite3_declare_vtab(db,
-           "CREATE TABLE x(id INTEGER,iq INTEGER, speed INTEGER, torque INTEGER)"
+           "CREATE TABLE x(id REAL, iq REAL, speed REAL, torque REAL, ld REAL, lq REAL, lambda REAL, Rs REAL, temp REAL)"
        );
 
   if( rc!=SQLITE_OK ) {
@@ -209,6 +145,10 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
   memset(pCur, 0, sizeof(*pCur));
   pCur->fptr = fptr;
 
+  fseek(fptr, 0L, SEEK_END);
+  size_t sz = ftell(fptr);
+  pCur->row_total = sz / sizeof(xbinData);
+
   *cur = &pCur->base;
   return SQLITE_OK;
 }
@@ -226,10 +166,10 @@ static int xbinClose(sqlite3_vtab_cursor *cur){
 }
 
 static int xbin_get_line( XbinCursor *pCur ) {
-  size_t ret = fread(pCur->buf, BUF_SIZE * sizeof(int16_t), 1, pCur->fptr);
   pCur->row ++;
-  if (ret < 1) {
-    pCur->eof = 1;
+  if ((pCur->row >> BLOCK_EXPO) >= pCur->block) {
+    size_t ret = fread(pCur->data, sizeof(xbinData), BLOCK_SIZE, pCur->fptr);
+    pCur->block ++;
   }
   return SQLITE_OK;
 }
@@ -251,7 +191,8 @@ static int xbinColumn(
   int i                       /* Which column to return */
 ){
   XbinCursor *pCur = (XbinCursor*)cur;
-  sqlite3_result_int(ctx, pCur->buf[i]);
+  float *start = (float *) &(pCur->data[pCur->row - ((pCur->block - 1)<<BLOCK_EXPO)]);
+  sqlite3_result_double(ctx, (double)start[i]);
   return SQLITE_OK;
 }
 
@@ -268,7 +209,8 @@ static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
 ** row of output.
 */
 static int xbinEof(sqlite3_vtab_cursor *cur){
-  return ((XbinCursor*)cur)->eof;
+  XbinCursor* pCur = (XbinCursor*) cur;
+  return pCur->row > pCur->row_total;
 }
 
 /*
@@ -285,7 +227,7 @@ static int xbinFilter(
   XbinCursor *pCur = (XbinCursor *)pVtabCursor;
   fseek( pCur->fptr, 0, SEEK_SET );
   pCur->row = 0;
-  pCur->eof = 0;
+  pCur->block = 0;
   return xbin_get_line(pCur);
 }
 

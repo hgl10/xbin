@@ -5,6 +5,6 @@
 ```sqlite
 .load xbin
 create virtual table xbin using xbin(./test.bin);
-select * from xbin;
+select count(*) from xbin;
 ```
 
