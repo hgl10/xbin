@@ -5,6 +5,8 @@
 ** .load xbin
 ** create virtual table xbin using xbin(./test.bin);
 ** select count(*) from xbin;
+** .timer on
+** select * from xbin order by id limit 10;
 */
 
 #if !defined(SQLITEINT_H)
@@ -168,7 +170,7 @@ static int xbinClose(sqlite3_vtab_cursor *cur){
 static int xbin_get_line( XbinCursor *pCur ) {
   pCur->row ++;
   if ((pCur->row >> BLOCK_EXPO) >= pCur->block) {
-    size_t ret = fread(pCur->data, sizeof(xbinData), BLOCK_SIZE, pCur->fptr);
+    fread(pCur->data, sizeof(xbinData), BLOCK_SIZE, pCur->fptr);
     pCur->block ++;
   }
   return SQLITE_OK;
