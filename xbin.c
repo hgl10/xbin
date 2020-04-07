@@ -265,6 +265,8 @@ static int xbinUpdate(
 ){
   XbinTable* pTab = (XbinTable*) vtab;
   if (argc == 1) {
+    sqlite3_free(pTab->base.zErrMsg);
+    pTab->base.zErrMsg = sqlite3_mprintf("Delete Error: Disable by default.");
     return SQLITE_ERROR;
   }
   return SQLITE_OK;;
