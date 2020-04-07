@@ -21,9 +21,6 @@ SQLITE_EXTENSION_INIT1
 #include <stdio.h>
 #include <stdint.h>
 
-#define BLOCK_EXPO 10
-#define BLOCK_SIZE 1024
-
 static int xbinCreate(sqlite3*, void*, int, const char*const*, 
                         sqlite3_vtab**,char**);
 static int xbinConnect(sqlite3*, void*, int, const char*const*, 
@@ -69,8 +66,7 @@ typedef struct XbinCursor {
   sqlite3_int64 row;          /* The rowid */
 
   sqlite3_int64 row_total;    /*total row size*/
-  sqlite3_int64 block;        /*block read*/
-  xbinData data[BLOCK_SIZE];
+  xbinData data;
 } XbinCursor;
 
 /*
@@ -171,10 +167,8 @@ static int xbinClose(sqlite3_vtab_cursor *cur){
 
 static int xbin_get_line( XbinCursor *pCur ) {
   pCur->row ++;
-  if ((pCur->row >> BLOCK_EXPO) >= pCur->block) {
-    fread(pCur->data, sizeof(xbinData), BLOCK_SIZE, pCur->fptr);
-    pCur->block ++;
-  }
+  fread(&pCur->data, sizeof(xbinData), 1, pCur->fptr);
+
   return SQLITE_OK;
 }
 
@@ -195,7 +189,7 @@ static int xbinColumn(
   int i                       /* Which column to return */
 ){
   XbinCursor *pCur = (XbinCursor*)cur;
-  float *start = (float *) &(pCur->data[pCur->row - ((pCur->block - 1)<<BLOCK_EXPO)]);
+  float *start = (float *) &(pCur->data);
   sqlite3_result_double(ctx, (double)start[i]);
   return SQLITE_OK;
 }
@@ -232,12 +226,10 @@ static int xbinFilter(
   if (idxNum == 0) {
     fseek( pCur->fptr, 0, SEEK_SET );
     pCur->row = 0;
-    pCur->block = 0;
     return xbin_get_line(pCur);
   } else if (idxNum == 1){
     pCur->row = sqlite3_value_int(argv[0]) - 1;
     fseek( pCur->fptr, (pCur->row - 1) * sizeof(xbinData), SEEK_SET );
-    pCur->block = (pCur->row >> BLOCK_EXPO);
     return xbin_get_line(pCur);
   }
 }
