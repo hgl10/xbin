@@ -119,7 +119,11 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
   *cur = NULL;
 
   fptr = fopen( pTab->filename, "rb" );
-  if ( fptr == NULL ) return SQLITE_ERROR;
+  if ( fptr == NULL ) {
+    sqlite3_free(pTab->base.zErrMsg);
+    pTab->base.zErrMsg = sqlite3_mprintf("==> Database File Not Found!");
+    return SQLITE_ERROR;
+  }
 
   pCur = sqlite3_malloc( sizeof(*pCur) );
   if( pCur==0 ) {
@@ -198,11 +202,11 @@ static int xbinEof(sqlite3_vtab_cursor *cur){
 /*
 ** This method is called to "rewind" the XbinCursor object back
 ** to the first row of output.  This method is always called at least
-** once prior to any call to xbinColumn() or xbinRowid() or 
+** once prior to any call to xbinColumn() or xbinRowid() or
 ** xbinEof().
 */
 static int xbinFilter(
-  sqlite3_vtab_cursor *pVtabCursor, 
+  sqlite3_vtab_cursor *pVtabCursor,
   int idxNum, const char *idxStr,
   int argc, sqlite3_value **argv
 ){
@@ -259,21 +263,52 @@ static int xbinBestIndex(
 }
 
 static int xbinUpdate(
-  sqlite3_vtab *vtab, 
-  int argc, sqlite3_value **argv, 
+  sqlite3_vtab *vtab,
+  int argc, sqlite3_value **argv,
   sqlite_int64 *rowid
 ){
+  printf("==> argc: %d\n", argc);
+  printf("%d -> %d\n", 0, argv[0]);
+
   XbinTable* pTab = (XbinTable*) vtab;
   if (argc == 1) {
+    // argc = 1
+    // argv[0] ≠ NULL
+    // DELETE: The single row with rowid or PRIMARY KEY equal to argv[0] is deleted. No insert occurs.
     sqlite3_free(pTab->base.zErrMsg);
-    pTab->base.zErrMsg = sqlite3_mprintf("Delete Error: Disable by default.");
+    pTab->base.zErrMsg = sqlite3_mprintf("Delete Error: delete is disabled by default.");
     return SQLITE_ERROR;
+  }else if ((argc > 1) && (sqlite3_value_type(argv[0]) == SQLITE_NULL)) {
+    // argc > 1
+    // argv[0] = NULL
+    // INSERT: A new row is inserted with column values taken from argv[2] and following.
+    // In a rowid virtual table, if argv[1] is an SQL NULL, then a new unique rowid is generated automatically.
+    FILE *fptr = fopen( pTab->filename, "a+b" );
+    if ( fptr == NULL ) {
+      sqlite3_free(pTab->base.zErrMsg);
+      pTab->base.zErrMsg = sqlite3_mprintf("==> Database file can NOT be opened!");
+      return SQLITE_ERROR;
+    }
+
+    xbinData data;
+    data.id = sqlite3_value_double(argv[2]);
+    data.iq = sqlite3_value_double(argv[3]);
+    data.speed = sqlite3_value_double(argv[4]);
+    data.torque = sqlite3_value_double(argv[5]);
+    data.Ld = sqlite3_value_double(argv[6]);
+    data.Lq = sqlite3_value_double(argv[7]);
+    data.Lambda = sqlite3_value_double(argv[8]);
+    data.Rs = sqlite3_value_double(argv[9]);
+    data.Temp = sqlite3_value_double(argv[10]);
+
+    fwrite(&data, sizeof(xbinData), 1, fptr);
+    fclose(fptr);
   }
-  return SQLITE_OK;;
+  return SQLITE_OK;
 }
 
 /*
-** This following structure defines all the methods for the 
+** This following structure defines all the methods for the
 ** virtual table.
 */
 static sqlite3_module xbinModule = {
@@ -308,8 +343,8 @@ static sqlite3_module xbinModule = {
 __declspec(dllexport)
 #endif
 int sqlite3_xbin_init(
-  sqlite3 *db, 
-  char **pzErrMsg, 
+  sqlite3 *db,
+  char **pzErrMsg,
   const sqlite3_api_routines *pApi
 ){
   int rc = SQLITE_OK;
