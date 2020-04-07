@@ -1,2 +1,3 @@
 xbin.dll:
 	cl /I . xbin.c -link -dll -out:xbin.dll
+	sqlite3.exe -init test.sql

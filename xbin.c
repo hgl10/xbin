@@ -6,9 +6,8 @@
 ** create virtual table xbin using xbin(./test.bin);
 ** select count(*) from xbin;
 ** .timer on
-** select * from xbin order by rowid limit 10;
 ** select rowid, * from xbin where rowid > 100000 order by rowid limit 10;
-** select * from xbin group by id, iq limit 10;
+** delete from xbin where rowid = 1;
 */
 
 #if !defined(SQLITEINT_H)
@@ -20,21 +19,6 @@ SQLITE_EXTENSION_INIT1
 #include <ctype.h>
 #include <stdio.h>
 #include <stdint.h>
-
-static int xbinCreate(sqlite3*, void*, int, const char*const*, 
-                        sqlite3_vtab**,char**);
-static int xbinConnect(sqlite3*, void*, int, const char*const*, 
-                        sqlite3_vtab**,char**);
-static int xbinBestIndex(sqlite3_vtab*,sqlite3_index_info*);
-static int xbinDisconnect(sqlite3_vtab*);
-static int xbinOpen(sqlite3_vtab*, sqlite3_vtab_cursor**);
-static int xbinClose(sqlite3_vtab_cursor*);
-static int xbinFilter(sqlite3_vtab_cursor*, int idxNum, const char *idxStr,
-                       int argc, sqlite3_value **argv);
-static int xbinNext(sqlite3_vtab_cursor*);
-static int xbinEof(sqlite3_vtab_cursor*);
-static int xbinColumn(sqlite3_vtab_cursor*,sqlite3_context*,int);
-static int xbinRowid(sqlite3_vtab_cursor*,sqlite3_int64*);
 
 typedef struct xbinData {
   float id;
@@ -274,6 +258,18 @@ static int xbinBestIndex(
   return SQLITE_OK;
 }
 
+static int xbinUpdate(
+  sqlite3_vtab *vtab, 
+  int argc, sqlite3_value **argv, 
+  sqlite_int64 *rowid
+){
+  XbinTable* pTab = (XbinTable*) vtab;
+  if (argc == 1) {
+    return SQLITE_ERROR;
+  }
+  return SQLITE_OK;;
+}
+
 /*
 ** This following structure defines all the methods for the 
 ** virtual table.
@@ -292,7 +288,7 @@ static sqlite3_module xbinModule = {
   /* xEof        */ xbinEof,
   /* xColumn     */ xbinColumn,
   /* xRowid      */ xbinRowid,
-  /* xUpdate     */ 0,
+  /* xUpdate     */ xbinUpdate,
   /* xBegin      */ 0,
   /* xSync       */ 0,
   /* xCommit     */ 0,
