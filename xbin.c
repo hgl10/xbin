@@ -6,7 +6,9 @@
 ** create virtual table xbin using xbin(./test.bin);
 ** select count(*) from xbin;
 ** .timer on
-** select * from xbin order by id limit 10;
+** select * from xbin order by rowid limit 10;
+** select rowid, * from xbin where rowid > 100000 order by rowid limit 10;
+** select * from xbin group by id, iq limit 10;
 */
 
 #if !defined(SQLITEINT_H)
@@ -227,10 +229,17 @@ static int xbinFilter(
   int argc, sqlite3_value **argv
 ){
   XbinCursor *pCur = (XbinCursor *)pVtabCursor;
-  fseek( pCur->fptr, 0, SEEK_SET );
-  pCur->row = 0;
-  pCur->block = 0;
-  return xbin_get_line(pCur);
+  if (idxNum == 0) {
+    fseek( pCur->fptr, 0, SEEK_SET );
+    pCur->row = 0;
+    pCur->block = 0;
+    return xbin_get_line(pCur);
+  } else if (idxNum == 1){
+    pCur->row = sqlite3_value_int(argv[0]) - 1;
+    fseek( pCur->fptr, (pCur->row - 1) * sizeof(xbinData), SEEK_SET );
+    pCur->block = (pCur->row >> BLOCK_EXPO);
+    return xbin_get_line(pCur);
+  }
 }
 
 /*
@@ -243,6 +252,33 @@ static int xbinBestIndex(
   sqlite3_vtab *tab,
   sqlite3_index_info *pIdxInfo
 ){
+  int i;
+  int idx = -1;
+  int unusable = 0;
+
+  for(i=0; i<pIdxInfo->nOrderBy; i++){
+    /*for rowid*/
+    if( pIdxInfo->aOrderBy[i].iColumn == -1 ) {
+        pIdxInfo->orderByConsumed = 1;
+    }
+  }
+
+  for(i=0; i<pIdxInfo->nConstraint; i++){
+    if( pIdxInfo->aConstraint[i].iColumn != -1 ) continue;
+    if( pIdxInfo->aConstraint[i].usable == 0 ){
+      unusable = 1;
+    }else if( pIdxInfo->aConstraint[i].op== SQLITE_INDEX_CONSTRAINT_EQ ){
+      idx = i;
+    }
+  }
+  pIdxInfo->estimatedCost = 1000.0;
+  if( idx >= 0 ){
+    pIdxInfo->aConstraintUsage[idx].argvIndex = 1;
+    pIdxInfo->aConstraintUsage[idx].omit = 1;
+    pIdxInfo->idxNum = 1;
+  }else if( unusable ){
+    return SQLITE_CONSTRAINT;
+  }
   return SQLITE_OK;
 }
 
