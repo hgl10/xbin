@@ -11,4 +11,4 @@ create virtual table xbin using xbin(./test.bin);
 -- insert into xbin(id, iq) values (1,2);
 -- update xbin set id = 15 where rowid = 100000;
 -- explain select rowid, * from xbin where row = 4;
-select rowid, * from xbin where row >= 5000000 limit 5;
+select rowid, * from xbin where row >= 4 limit 5;

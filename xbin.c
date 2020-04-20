@@ -38,6 +38,7 @@ typedef struct xbinData {
 typedef struct XbinTable {
   sqlite3_vtab base;  /* Base class - must be first */
   char *filename;     /* Name of the xbin file */
+  FILE *fptr;                 /* used to scan file */
 } XbinTable;
 
 /* XbinCursor is a subclass of sqlite3_vtab_cursor which will
@@ -48,7 +49,6 @@ typedef struct XbinCursor {
   sqlite3_vtab_cursor base;   /* Base class - must be first */
   FILE *fptr;                 /* used to scan file */
   sqlite3_int64 row;          /* The rowid */
-
   xbinData data;
 } XbinCursor;
 
@@ -72,25 +72,34 @@ static int xbinConnect(
   sqlite3_vtab **ppVtab,
   char **pzErr
 ) {
-  XbinTable *pNew;
+  XbinTable *pTab;
   int rc;
   const char *filename = argv[3];
   if ( argc != 4 ) return SQLITE_ERROR;
 
-  pNew = sqlite3_malloc( sizeof(*pNew) );
-  *ppVtab = (sqlite3_vtab*)pNew;
-  if ( pNew == 0 ) return SQLITE_NOMEM;
-  memset(pNew, 0, sizeof(*pNew));
+  pTab = sqlite3_malloc( sizeof(*pTab) );
+  *ppVtab = (sqlite3_vtab*)pTab;
+  if ( pTab == 0 ) return SQLITE_NOMEM;
+  memset(pTab, 0, sizeof(*pTab));
 
-  pNew->filename = sqlite3_mprintf( "%s", filename );
+  pTab->filename = sqlite3_mprintf( "%s", filename );
 
   rc = sqlite3_declare_vtab(db,
                             "CREATE TABLE x(row INTEGER PRIMARY KEY, id REAL, iq REAL, speed REAL, torque REAL, ld REAL, lq REAL, lambda REAL, Rs REAL, temp REAL)"
                            );
 
   if ( rc != SQLITE_OK ) {
-    sqlite3_free( pNew->filename );
-    sqlite3_free( pNew );
+    sqlite3_free( pTab->filename );
+    sqlite3_free( pTab );
+    return SQLITE_ERROR;
+  }
+
+  pTab->fptr = fopen( pTab->filename, "r+b" );
+  if ( pTab->fptr == NULL ) {
+    sqlite3_free(pTab->base.zErrMsg);
+    pTab->base.zErrMsg = sqlite3_mprintf("==> Database File Not Found!");
+    sqlite3_free( pTab->filename );
+    sqlite3_free( pTab );
     return SQLITE_ERROR;
   }
 
@@ -101,9 +110,12 @@ static int xbinConnect(
 ** This method is the destructor for XbinTable objects.
 */
 static int xbinDisconnect(sqlite3_vtab *pVtab) {
-  XbinTable *p = (XbinTable*)pVtab;
-  sqlite3_free( p->filename );
-  sqlite3_free(p);
+  XbinTable *pTab = (XbinTable*)pVtab;
+  if (pTab->fptr != NULL) {
+    fclose(pTab->fptr);
+  }
+  sqlite3_free( pTab->filename );
+  sqlite3_free(pTab);
   return SQLITE_OK;
 }
 
@@ -115,23 +127,13 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur) {
   XbinCursor  *pCur;
   FILE        *fptr;
 
-  *cur = NULL;
-
-  fptr = fopen( pTab->filename, "rb" );
-  if ( fptr == NULL ) {
-    sqlite3_free(pTab->base.zErrMsg);
-    pTab->base.zErrMsg = sqlite3_mprintf("==> Database File Not Found!");
-    return SQLITE_ERROR;
-  }
-
   pCur = sqlite3_malloc( sizeof(*pCur) );
   if ( pCur == 0 ) {
-    fclose(fptr);
     return SQLITE_NOMEM;
   }
   memset(pCur, 0, sizeof(*pCur));
-  pCur->fptr = fptr;
 
+  pCur->fptr = pTab->fptr;
   *cur = &pCur->base;
   return SQLITE_OK;
 }
@@ -141,9 +143,6 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur) {
 */
 static int xbinClose(sqlite3_vtab_cursor *cur) {
   XbinCursor *pCur = (XbinCursor*)cur;
-  if (pCur->fptr != NULL) {
-    fclose(pCur->fptr);
-  }
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
@@ -273,9 +272,6 @@ static int xbinUpdate(
   int argc, sqlite3_value **argv,
   sqlite_int64 *rowid
 ) {
-  printf("==> argc: %d\n", argc);
-  printf("%d -> %d\n", 0, argv[0]);
-
   XbinTable* pTab = (XbinTable*) vtab;
   if (argc == 1) {
     // argc = 1
@@ -289,26 +285,21 @@ static int xbinUpdate(
     // argv[0] = NULL
     // INSERT: A new row is inserted with column values taken from argv[2] and following.
     // In a rowid virtual table, if argv[1] is an SQL NULL, then a new unique rowid is generated automatically.
-    FILE *fptr = fopen( pTab->filename, "a+b" );
-    if ( fptr == NULL ) {
-      sqlite3_free(pTab->base.zErrMsg);
-      pTab->base.zErrMsg = sqlite3_mprintf("==> Database file can NOT be opened!");
-      return SQLITE_ERROR;
-    }
+
+    fseek(pTab->fptr, 0, SEEK_END);
 
     xbinData data;
-    data.id = sqlite3_value_double(argv[2]);
-    data.iq = sqlite3_value_double(argv[3]);
-    data.speed = sqlite3_value_double(argv[4]);
-    data.torque = sqlite3_value_double(argv[5]);
-    data.Ld = sqlite3_value_double(argv[6]);
-    data.Lq = sqlite3_value_double(argv[7]);
-    data.Lambda = sqlite3_value_double(argv[8]);
-    data.Rs = sqlite3_value_double(argv[9]);
-    data.Temp = sqlite3_value_double(argv[10]);
+    data.id = sqlite3_value_double(argv[3]);
+    data.iq = sqlite3_value_double(argv[4]);
+    data.speed = sqlite3_value_double(argv[5]);
+    data.torque = sqlite3_value_double(argv[6]);
+    data.Ld = sqlite3_value_double(argv[7]);
+    data.Lq = sqlite3_value_double(argv[8]);
+    data.Lambda = sqlite3_value_double(argv[9]);
+    data.Rs = sqlite3_value_double(argv[10]);
+    data.Temp = sqlite3_value_double(argv[11]);
 
-    fwrite(&data, sizeof(xbinData), 1, fptr);
-    fclose(fptr);
+    fwrite(&data, sizeof(xbinData), 1, pTab->fptr);
   }
   return SQLITE_OK;
 }
@@ -331,7 +322,7 @@ static sqlite3_module xbinModule = {
   /* xEof        */ xbinEof,
   /* xColumn     */ xbinColumn,
   /* xRowid      */ xbinRowid,
-  /* xUpdate     */ 0,
+  /* xUpdate     */ xbinUpdate,
   /* xBegin      */ 0,
   /* xSync       */ 0,
   /* xCommit     */ 0,
