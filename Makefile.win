@@ -1,3 +1,4 @@
 default:
-	cl /I . xbin.c -link -dll -out:xbin.dll
-	sqlite3.exe -init test.sql
+	del /Q xbin.dll xbin.exp xbin.lib xbin.obj
+	cl /DEBUG:FULL /I . xbin.c -link -dll -out:xbin.dll
+	.\sqlite3.exe -init test.sql

@@ -49,7 +49,6 @@ typedef struct XbinCursor {
   FILE *fptr;                 /* used to scan file */
   sqlite3_int64 row;          /* The rowid */
 
-  sqlite3_int64 row_total;    /*total row size*/
   xbinData data;
 } XbinCursor;
 
@@ -72,7 +71,7 @@ static int xbinConnect(
   int argc, const char *const*argv,
   sqlite3_vtab **ppVtab,
   char **pzErr
-){
+) {
   XbinTable *pNew;
   int rc;
   const char *filename = argv[3];
@@ -80,16 +79,16 @@ static int xbinConnect(
 
   pNew = sqlite3_malloc( sizeof(*pNew) );
   *ppVtab = (sqlite3_vtab*)pNew;
-  if( pNew==0 ) return SQLITE_NOMEM;
+  if ( pNew == 0 ) return SQLITE_NOMEM;
   memset(pNew, 0, sizeof(*pNew));
 
   pNew->filename = sqlite3_mprintf( "%s", filename );
 
   rc = sqlite3_declare_vtab(db,
-           "CREATE TABLE x(id REAL, iq REAL, speed REAL, torque REAL, ld REAL, lq REAL, lambda REAL, Rs REAL, temp REAL)"
-       );
+                            "CREATE TABLE x(row INTEGER PRIMARY KEY, id REAL, iq REAL, speed REAL, torque REAL, ld REAL, lq REAL, lambda REAL, Rs REAL, temp REAL)"
+                           );
 
-  if( rc!=SQLITE_OK ) {
+  if ( rc != SQLITE_OK ) {
     sqlite3_free( pNew->filename );
     sqlite3_free( pNew );
     return SQLITE_ERROR;
@@ -101,7 +100,7 @@ static int xbinConnect(
 /*
 ** This method is the destructor for XbinTable objects.
 */
-static int xbinDisconnect(sqlite3_vtab *pVtab){
+static int xbinDisconnect(sqlite3_vtab *pVtab) {
   XbinTable *p = (XbinTable*)pVtab;
   sqlite3_free( p->filename );
   sqlite3_free(p);
@@ -111,7 +110,7 @@ static int xbinDisconnect(sqlite3_vtab *pVtab){
 /*
 ** Constructor for a new XbinCursor object.
 */
-static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
+static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur) {
   XbinTable   *pTab = (XbinTable*) p;
   XbinCursor  *pCur;
   FILE        *fptr;
@@ -126,16 +125,12 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
   }
 
   pCur = sqlite3_malloc( sizeof(*pCur) );
-  if( pCur==0 ) {
+  if ( pCur == 0 ) {
     fclose(fptr);
     return SQLITE_NOMEM;
   }
   memset(pCur, 0, sizeof(*pCur));
   pCur->fptr = fptr;
-
-  fseek(fptr, 0L, SEEK_END);
-  size_t sz = ftell(fptr);
-  pCur->row_total = sz / sizeof(xbinData);
 
   *cur = &pCur->base;
   return SQLITE_OK;
@@ -144,7 +139,7 @@ static int xbinOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **cur){
 /*
 ** Destructor for a XbinCursor.
 */
-static int xbinClose(sqlite3_vtab_cursor *cur){
+static int xbinClose(sqlite3_vtab_cursor *cur) {
   XbinCursor *pCur = (XbinCursor*)cur;
   if (pCur->fptr != NULL) {
     fclose(pCur->fptr);
@@ -163,7 +158,7 @@ static int xbin_get_line( XbinCursor *pCur ) {
 /*
 ** Advance a XbinCursor to its next row of output.
 */
-static int xbinNext(sqlite3_vtab_cursor *cur){
+static int xbinNext(sqlite3_vtab_cursor *cur) {
   return xbin_get_line((XbinCursor*)cur);
 }
 
@@ -175,17 +170,21 @@ static int xbinColumn(
   sqlite3_vtab_cursor *cur,   /* The cursor */
   sqlite3_context *ctx,       /* First argument to sqlite3_result_...() */
   int i                       /* Which column to return */
-){
+) {
   XbinCursor *pCur = (XbinCursor*)cur;
-  float *start = (float *) &(pCur->data);
-  sqlite3_result_double(ctx, (double)start[i]);
+  if (i == 0) {
+    sqlite3_result_int64(ctx, pCur->row);
+    return SQLITE_OK;
+  }
+  float *start = (float *) & (pCur->data);
+  sqlite3_result_double(ctx, (double)start[i - 1]);
   return SQLITE_OK;
 }
 
 /*
 ** Return the rowid for the current row, just same as the row number.
 */
-static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
+static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
   *pRowid = ((XbinCursor*)cur)->row;
   return SQLITE_OK;
 }
@@ -194,9 +193,9 @@ static int xbinRowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid){
 ** Return TRUE if the cursor has been moved off of the last
 ** row of output.
 */
-static int xbinEof(sqlite3_vtab_cursor *cur){
+static int xbinEof(sqlite3_vtab_cursor *cur) {
   XbinCursor* pCur = (XbinCursor*) cur;
-  return pCur->row > pCur->row_total;
+  return feof(pCur->fptr);
 }
 
 /*
@@ -209,15 +208,15 @@ static int xbinFilter(
   sqlite3_vtab_cursor *pVtabCursor,
   int idxNum, const char *idxStr,
   int argc, sqlite3_value **argv
-){
+) {
   XbinCursor *pCur = (XbinCursor *)pVtabCursor;
   if (idxNum == 0) {
     fseek( pCur->fptr, 0, SEEK_SET );
     pCur->row = 0;
     return xbin_get_line(pCur);
-  } else if (idxNum == 1){
-    pCur->row = sqlite3_value_int(argv[0]) - 1;
-    fseek( pCur->fptr, (pCur->row - 1) * sizeof(xbinData), SEEK_SET );
+  } else if (idxNum == 1) {
+    pCur->row = sqlite3_value_int64(argv[0]) - 1;
+    fseek( pCur->fptr, (pCur->row) * sizeof(xbinData), SEEK_SET );
     return xbin_get_line(pCur);
   }
 }
@@ -231,34 +230,41 @@ static int xbinFilter(
 static int xbinBestIndex(
   sqlite3_vtab *tab,
   sqlite3_index_info *pIdxInfo
-){
+) {
   int i;
   int idx = -1;
-  int unusable = 0;
 
-  for(i=0; i<pIdxInfo->nOrderBy; i++){
+  for (i = 0; i < pIdxInfo->nOrderBy; i++) {
     /*for rowid*/
-    if( pIdxInfo->aOrderBy[i].iColumn == -1 ) {
-        pIdxInfo->orderByConsumed = 1;
+    if ( pIdxInfo->aOrderBy[i].iColumn == 0 ) {
+      pIdxInfo->orderByConsumed = 1;
+      break;
     }
   }
 
-  for(i=0; i<pIdxInfo->nConstraint; i++){
-    if( pIdxInfo->aConstraint[i].iColumn != -1 ) continue;
-    if( pIdxInfo->aConstraint[i].usable == 0 ){
-      unusable = 1;
-    }else if( pIdxInfo->aConstraint[i].op== SQLITE_INDEX_CONSTRAINT_EQ ){
+  for (i = 0; i < pIdxInfo->nConstraint; i++) {
+    if ( pIdxInfo->aConstraint[i].iColumn != 0 ) continue;
+    if ( pIdxInfo->aConstraint[i].usable == 0 ) {
+      return SQLITE_CONSTRAINT;
+    }
+    if ( (pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_EQ) || (pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_GE) ) {
       idx = i;
     }
   }
-  pIdxInfo->estimatedCost = 1000.0;
-  if( idx >= 0 ){
+
+  if ( idx >= 0 ) {
     pIdxInfo->aConstraintUsage[idx].argvIndex = 1;
     pIdxInfo->aConstraintUsage[idx].omit = 1;
+    pIdxInfo->estimatedRows = 1;
     pIdxInfo->idxNum = 1;
-  }else if( unusable ){
-    return SQLITE_CONSTRAINT;
+    pIdxInfo->estimatedCost = 1.0;
+    pIdxInfo->idxFlags = SQLITE_INDEX_SCAN_UNIQUE;
+    return SQLITE_OK;
   }
+
+  pIdxInfo->idxNum = 0;
+  pIdxInfo->estimatedCost = 100000.0;
+  pIdxInfo->estimatedRows = 100000;
   return SQLITE_OK;
 }
 
@@ -266,7 +272,7 @@ static int xbinUpdate(
   sqlite3_vtab *vtab,
   int argc, sqlite3_value **argv,
   sqlite_int64 *rowid
-){
+) {
   printf("==> argc: %d\n", argc);
   printf("%d -> %d\n", 0, argv[0]);
 
@@ -278,7 +284,7 @@ static int xbinUpdate(
     sqlite3_free(pTab->base.zErrMsg);
     pTab->base.zErrMsg = sqlite3_mprintf("Delete Error: delete is disabled by default.");
     return SQLITE_ERROR;
-  }else if ((argc > 1) && (sqlite3_value_type(argv[0]) == SQLITE_NULL)) {
+  } else if ((argc > 1) && (sqlite3_value_type(argv[0]) == SQLITE_NULL)) {
     // argc > 1
     // argv[0] = NULL
     // INSERT: A new row is inserted with column values taken from argv[2] and following.
@@ -325,7 +331,7 @@ static sqlite3_module xbinModule = {
   /* xEof        */ xbinEof,
   /* xColumn     */ xbinColumn,
   /* xRowid      */ xbinRowid,
-  /* xUpdate     */ xbinUpdate,
+  /* xUpdate     */ 0,
   /* xBegin      */ 0,
   /* xSync       */ 0,
   /* xCommit     */ 0,
@@ -346,7 +352,7 @@ int sqlite3_xbin_init(
   sqlite3 *db,
   char **pzErrMsg,
   const sqlite3_api_routines *pApi
-){
+) {
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
   rc = sqlite3_create_module(db, "xbin", &xbinModule, NULL);

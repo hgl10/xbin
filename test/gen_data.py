@@ -12,7 +12,7 @@ with open("../test.bin", "wb") as bf:
     Rs = 0.001
     lamb = 0.003
     temp = 80
-    for row in range(10):
+    for row in range(8000000):
         bf.write(value(id_))
         bf.write(value(iq_))
         bf.write(value(speed))
