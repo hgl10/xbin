@@ -38,7 +38,7 @@ typedef struct xbinData {
 typedef struct XbinTable {
   sqlite3_vtab base;  /* Base class - must be first */
   char *filename;     /* Name of the xbin file */
-  FILE *fptr;                 /* used to scan file */
+  FILE *fptr;         /* used to scan file */
 } XbinTable;
 
 /* XbinCursor is a subclass of sqlite3_vtab_cursor which will
@@ -285,7 +285,6 @@ static int xbinUpdate(
     // argv[0] = NULL
     // INSERT: A new row is inserted with column values taken from argv[2] and following.
     // In a rowid virtual table, if argv[1] is an SQL NULL, then a new unique rowid is generated automatically.
-
     fseek(pTab->fptr, 0, SEEK_END);
 
     xbinData data;
